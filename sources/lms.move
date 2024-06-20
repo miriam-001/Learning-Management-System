@@ -10,15 +10,16 @@ module lms::lms {
   use sui::balance::{Self, Balance};
   use sui::tx_context::{Self, TxContext};
 
-  //   errors
+  // Errors
   const EInsufficientBalance: u64 = 1;
   const ENotInstitute: u64 = 2;
   const ENotInstituteStudent: u64 = 5;
   const EInsufficientCapacity: u64 = 6;
   const EGrantNotApproved: u64 = 7;
   const ENotOwner: u64 = 8;
+  const ENotAuthorized: u64 = 9;
 
-  //   structs
+  // Structs
   struct Institute has key, store {
     id: UID,
     name: String,
@@ -29,6 +30,7 @@ module lms::lms {
     courses: Table<String, Course>,
     enrollments: Table<ID, Enrollment>,
     institute: address,
+    admins: vector<address>,
   }
 
   struct InstituteCap has key {
@@ -60,7 +62,7 @@ module lms::lms {
     date: String,
     time: u64,
   }
-  
+
   struct GrantRequest has key, store {
     id: UID,
     student: address,
@@ -68,6 +70,7 @@ module lms::lms {
     reason: String,
     approved: bool,
   }
+
   struct GrantApproval has key, store {
     id: UID,
     grant_request_id: ID,
@@ -76,8 +79,8 @@ module lms::lms {
     reason: String,
   }
 
-  //   functions
-  // create new institute
+  // Functions
+  // Create new institute
   public fun create_institute(
     name: String,
     email: String,
@@ -97,6 +100,7 @@ module lms::lms {
       courses: table::new<String, Course>(ctx),
       enrollments: table::new<ID, Enrollment>(ctx),
       institute: tx_context::sender(ctx),
+      admins: vector::empty<address>(),
     };
 
     let cap = InstituteCap {
@@ -107,7 +111,25 @@ module lms::lms {
     cap
   }
 
-  // create new student
+  // Add institute admin
+  public entry fun add_institute_admin(
+    cap: &InstituteCap,
+    self: &mut Institute,
+    admin: address,
+  ) {
+    assert!(cap.to == object::id(self), ENotOwner);
+    vector::push_back(&mut self.admins, admin);
+  }
+
+  // Check if user is an admin
+  fun is_institute_admin(
+    institute: &Institute,
+    user: address
+  ) : bool {
+    vector::contains(&institute.admins, &user)
+  }
+
+  // Create new student
   public fun create_student(
     name: String,
     email: String,
@@ -125,15 +147,18 @@ module lms::lms {
     }
   }
 
-  //  add course
+  // Add course
   public entry fun add_course(
     cap: &InstituteCap,
     self: &mut Institute,
     title: String,
     instructor: String,
-    capacity: u64
+    capacity: u64,
+    ctx: &TxContext
   ) {
     assert!(cap.to == object::id(self), ENotOwner);
+    assert!(is_institute_admin(self, tx_context::sender(ctx)), ENotAuthorized);
+
     let course = Course {
       title,
       instructor,
@@ -143,7 +168,7 @@ module lms::lms {
     table::add(&mut self.courses, title, course);
   }
 
-  //add enrollment
+  // Add enrollment
   public entry fun add_enrollment(
     institute: &mut Institute,
     student: &mut Student,
@@ -163,20 +188,20 @@ module lms::lms {
       time: clock::timestamp_ms(clock),
     };
     let course_ = table::borrow_mut(&mut institute.courses, course);
-    // deduct fees from student balance
+    // Deduct fees from student balance
     assert!(balance::value(&student.balance) >= institute.fees, EInsufficientBalance);
     assert!(vector::length(&course_.enrolledStudents) < course_.capacity, EInsufficientCapacity);
 
     let fees = balance::split(&mut student.balance, institute.fees);
     balance::join(&mut institute.balance, fees);
 
-    // enroll student in course
+    // Enroll student in course
     vector::push_back(&mut course_.enrolledStudents, student.student);
 
     table::add<ID, Enrollment>(&mut institute.enrollments, object::uid_to_inner(&enrollment.id), enrollment);
   }
 
-  // fund student account
+  // Fund student account
   public entry fun deposit_student_account(
     student: &mut Student,
     amount: Coin<SUI>,
@@ -184,21 +209,21 @@ module lms::lms {
     coin::put(&mut student.balance, amount);
   }
 
-  // check student balance
+  // Check student balance
   public fun student_check_balance(
     student: &Student,
   ) : u64  {
     balance::value(&student.balance)
   }
 
-  // institute check balance
+  // Institute check balance
   public fun institute_check_balance(
     self: &Institute,
   ) : u64 {
     balance::value(&self.balance)
-
   }
-  // withdraw institute balance
+
+  // Withdraw institute balance
   public fun withdraw_institute_balance(
     cap: &InstituteCap,
     self: &mut Institute,    
@@ -209,13 +234,14 @@ module lms::lms {
     let payment = coin::take(&mut self.balance, amount, ctx);
     payment
   }
-// create new grant request
-public entry fun create_grant_request(
+
+  // Create new grant request
+  public entry fun create_grant_request(
     student: &mut Student,
     amount_requested: u64,
     reason: String,
     ctx: &mut TxContext
-) {
+  ) {
     let grant_request_id = object::new(ctx);
     let grant_request = GrantRequest {
         id: grant_request_id,
@@ -225,16 +251,16 @@ public entry fun create_grant_request(
         approved: false,
     };
     transfer::share_object(grant_request);
-}
+  }
 
-// approve grant request
-public entry fun approve_grant_request(
+  // Approve grant request
+  public entry fun approve_grant_request(
     grant_request: &mut GrantRequest,
     approved_by: address,
     amount_approved: u64,
     reason: String,
     ctx: &mut TxContext
-) {
+  ) {
     assert!(tx_context::sender(ctx) == approved_by, ENotInstitute);
     assert!(!grant_request.approved, EGrantNotApproved);
 
@@ -249,27 +275,38 @@ public entry fun approve_grant_request(
         reason,
     };
     transfer::share_object(grant_approval);
-    }
-    // update course information
-    public fun update_course(
-        course: &mut Course,
-        title: String,
-        instructor: String,
-        capacity: u64
-    ) {
-        course.title = title;
-        course.instructor = instructor;
-        course.capacity = capacity;
-    }
-    // update student information
-    public entry fun update_student(
-        student: &mut Student,
-        name: String,
-        email: String,
-        homeAddress: String,
-    ) {
-        student.name = name;
-        student.email = email;
-        student.homeAddress = homeAddress;
-    }
+  }
+
+  // Update course information
+  public entry fun update_course(
+    cap: &InstituteCap,
+    institute: &mut Institute,
+    title: String,
+    instructor: String,
+    capacity: u64,
+    ctx: &TxContext
+  ) {
+    assert!(cap.to == object::id(institute), ENotOwner);
+    assert!(is_institute_admin(institute, tx_context::sender(ctx)), ENotAuthorized);
+
+    let mut course = table::borrow_mut(&mut institute.courses, title);
+    course.title = title;
+    course.instructor = instructor;
+    course.capacity = capacity;
+  }
+
+  // Update student information
+  public entry fun update_student(
+    student: &mut Student,
+    name: String,
+    email: String,
+    homeAddress: String,
+    ctx: &TxContext
+  ) {
+    assert!(tx_context::sender(ctx) == student.student, ENotAuthorized);
+
+    student.name = name;
+    student.email = email;
+    student.homeAddress = homeAddress;
+  }
 }
